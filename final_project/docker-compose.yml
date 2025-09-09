@@ -1,0 +1,202 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - my-de-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - my-de-network
+
+  postgres:
+    image: debezium/postgres:14
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: nyc_taxi
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5432:5432"
+    command: >
+      postgres -c wal_level=logical
+               -c max_wal_senders=5
+               -c max_replication_slots=5
+    volumes:
+      # 1) Lưu bền dữ liệu Postgres
+      - ./data/Postgres:/var/lib/postgresql/data
+      # 2) Mount folder SQL trong dự án vào container (read-only)
+      - ./src/Sql:/sql:ro
+    networks:
+      - my-de-network
+      
+
+  connect:
+    image: debezium/connect:2.5
+    container_name: kafka_connect
+    depends_on:
+      - kafka
+      - postgres
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      DEBEZIUM_LOG_LEVEL: DEBUG
+      PLUGIN_PATH: "/usr/share/java,/kafka/connect,/usr/share/confluent-hub-components/debezium-transforms"
+    volumes:
+      - ./src/Plugins/clickhouse-kafka-sink-connector:/kafka/connect/clickhouse-kafka-sink-connector
+      - ./src/Plugins/debezium-tranform:/usr/share/confluent-hub-components/debezium-transforms
+    networks:
+      - my-de-network
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    container_name: schema_registry
+    depends_on:
+      - kafka
+    ports:
+      - "8081:8081"
+    environment:
+      - SCHEMA_REGISTRY_HOST_NAME=schema-registry
+      - SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS=kafka:9092
+      - SCHEMA_REGISTRY_LISTENERS=http://0.0.0.0:8081
+    networks:
+      - my-de-network
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka_ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+    networks:
+      - my-de-network
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    user: "0:0"  # <--- THÊM DÒNG NÀY
+    container_name: clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: nyc_taxi
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./src/Sql/clickhouse.sql:/docker-entrypoint-initdb.d/clickhouse.sql
+    networks:
+      - my-de-network
+  data-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: data-generator
+    depends_on:
+      - postgres
+    restart: unless-stopped
+  spark:
+    image: bitnami/spark:3.3.2
+    container_name: spark
+    depends_on:
+      - kafka
+      - zookeeper
+      - postgres
+    ports:
+      - "4040:4040"
+    environment:
+      - SPARK_MASTER_URL=spark://spark:7077
+      - SPARK_WORKLOAD=master
+    volumes:
+    - ./src:/app  # Ánh xạ toàn bộ thư mục src vào /app trong container
+    networks:
+      - my-de-network
+  # Cấu hình thêm cho Airflow
+  airflow-db:
+    image: postgres:13
+    container_name: airflow-db
+    environment:
+      - POSTGRES_USER= postgres
+      - POSTGRES_PASSWORD= postgres
+      - POSTGRES_DB= nyc_taxi
+    networks:
+      - my-de-network
+  
+  airflow-worker:
+    image: apache/airflow:2.6.3-python3.9
+    container_name: airflow-worker
+    depends_on:
+      - airflow-db
+      - spark
+    volumes:
+      - ./src/Dags:/opt/airflow/dags
+      - ./src/Plugins:/opt/airflow/plugins
+    environment:
+      - AIRFLOW_CELERY_BROKER_URL=redis://redis:6379/0
+      - AIRFLOW_CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - AIRFLOW_EXECUTOR=CeleryExecutor
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    networks:
+      - my-de-network
+  hive-metastore:
+    image: apache/hive:3.1.3
+    container_name: hive-metastore
+    hostname: hive-metastore
+    depends_on:
+      - postgres
+    environment:
+      - HIVE_DATABASE_TYPE=postgres
+      - HIVE_DATABASE_HOST=postgres
+      - HIVE_DATABASE_PORT=5432
+      - HIVE_DATABASE_USER=postgres
+      - HIVE_DATABASE_PASSWORD=postgres
+      - HIVE_METASTORE_PORT=9083
+      - HIVE_AUX_JARS_PATH=/opt/hive/lib/custom-jars/tez-api-0.9.1.jar
+    ports:
+      - "9083:9083"
+    volumes:
+      - data-hive-metastore:/opt/bitnami/hive/data/metastore
+      - ./src/Hive-metastore:/opt/hive/lib/custom-jars
+    networks:
+      - my-de-network
+
+ 
+networks:
+  my-de-network:
+    driver: bridge
+volumes:
+  clickhouse_data:
+  data-hive-metastore:
+  

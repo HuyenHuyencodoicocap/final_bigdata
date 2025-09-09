@@ -1,0 +1,31 @@
+{
+  "name": "pg-nyc-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "topic.prefix": "nycdb",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "postgres",
+    "database.password": "postgres",
+    "database.dbname": "nyc_taxi",
+    "plugin.name": "pgoutput",
+
+    "slot.name": "debezium",
+    "slot.drop.on.stop": "true",
+
+    "publication.autocreate.mode": "filtered",
+    "schema.include.list": "public",
+    "table.include.list": "public.yellow_trips",
+
+    "snapshot.mode": "initial",
+    "include.schema.changes": "false",
+
+    "decimal.handling.mode": "double",
+    "time.precision.mode": "adaptive_time_microseconds",
+    "tombstones.on.delete": "false",
+
+    "heartbeat.interval.ms": "0",
+    "max.queue.size": "8192",
+    "max.batch.size": "2048"
+  }
+}
