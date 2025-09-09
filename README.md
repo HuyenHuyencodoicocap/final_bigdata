@@ -1,5 +1,4 @@
-### final_bigdata
-Tổng quát dựu án: Dự án thực hiện phân tích nguồn dữ liệu NYC_Taxi
+
 ## Hướng dẫn chạy:
 ### Lệnh khởi động dự án
 docker compose up -d
